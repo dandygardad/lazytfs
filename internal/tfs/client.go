@@ -90,6 +90,14 @@ func (c *Client) ResolveConflicts(path string, takeServer bool) (string, error) 
 	return c.execute("resolve", path, "/recursive", resolution)
 }
 
+// Checkin executes a checkin for the specified files with the given comment.
+func (c *Client) Checkin(files []string, comment string) (string, error) {
+	args := []string{"checkin"}
+	args = append(args, files...)
+	args = append(args, "/comment:"+comment)
+	return c.execute(args...)
+}
+
 // Conflict represents a file conflict with its path and reason.
 type Conflict struct {
 	Path   string

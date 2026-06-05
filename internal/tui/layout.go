@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -558,8 +557,14 @@ func (l *Layout) setupKeybindings() {
 			if mainText == "(None)" || strings.HasPrefix(mainText, "Error:") || strings.HasPrefix(mainText, "Loading") {
 				return
 			}
-			cleanText := mainText
-			filename := extractFilePath(cleanText)
+			rawItem := secondaryText
+			if rawItem == "" {
+				rawItem = mainText
+			}
+			if strings.HasSuffix(strings.TrimSpace(rawItem), ":") {
+				return // Ignore Enter on headers
+			}
+			filename := extractFilePath(rawItem)
 			if filename != "" {
 				l.MainView.SetText("Loading diff for " + filename + "...")
 				go func() {
@@ -659,9 +664,32 @@ func (l *Layout) toggleStaged(list *tview.List) {
 	l.mu.Lock()
 	idx := list.GetCurrentItem()
 	if idx >= 0 && idx < list.GetItemCount() {
-		mainText, _ := list.GetItemText(idx)
+		mainText, secondaryText := list.GetItemText(idx)
 		if mainText != "(None)" && !strings.HasPrefix(mainText, "Error:") {
-			l.stagedFiles[mainText] = !l.stagedFiles[mainText]
+			rawItem := secondaryText
+			if rawItem == "" {
+				rawItem = mainText
+			}
+			
+			isHeader := strings.HasSuffix(strings.TrimSpace(rawItem), ":")
+			newState := !l.stagedFiles[rawItem]
+			l.stagedFiles[rawItem] = newState
+
+			if isHeader {
+				found := false
+				for _, item := range l.filesData {
+					if item == rawItem {
+						found = true
+						continue
+					}
+					if found {
+						if strings.HasSuffix(strings.TrimSpace(item), ":") {
+							break
+						}
+						l.stagedFiles[item] = newState
+					}
+				}
+			}
 		}
 	}
 	l.mu.Unlock()
@@ -820,16 +848,18 @@ func (l *Layout) renderFilesPanel() {
 			continue
 		}
 
+		display := formatFileItem(item)
+
 		if l.stagedFiles[item] {
 			if l.searchQueryStaged != "" && !strings.Contains(strings.ToLower(item), l.searchQueryStaged) {
 				continue
 			}
-			l.StagedList.AddItem(item, "", 0, nil)
+			l.StagedList.AddItem(display, item, 0, nil)
 		} else {
 			if l.searchQueryUnstaged != "" && !strings.Contains(strings.ToLower(item), l.searchQueryUnstaged) {
 				continue
 			}
-			l.FilesList.AddItem(item, "", 0, nil)
+			l.FilesList.AddItem(display, item, 0, nil)
 		}
 	}
 
@@ -937,26 +967,51 @@ func (l *Layout) setupCheckinUI() {
 			l.Pages.HidePage("checkin_confirm2")
 			l.Pages.HidePage("checkin_page")
 			
-			// DEBUG: Print command to main view
 			var filesToCkin []string
 			l.mu.Lock()
 			for f, staged := range l.stagedFiles {
 				if staged {
+					if strings.HasSuffix(strings.TrimSpace(f), ":") {
+						continue
+					}
 					extractedPath := extractFilePath(f)
 					if extractedPath != "" {
-						filesToCkin = append(filesToCkin, `"`+extractedPath+`"`)
+						filesToCkin = append(filesToCkin, extractedPath)
 					}
 				}
 			}
 			l.mu.Unlock()
-			
+
 			msg := l.CheckinInput.GetText()
-			cmdStr := fmt.Sprintf("tf checkin %s /comment:\"%s\"", strings.Join(filesToCkin, " "), msg)
-			
-			l.MainView.SetTitle(" Checkin Debug Output ")
-			l.MainView.SetText("Command that would be executed:\n\n" + cmdStr)
-			l.CheckinInput.SetText("") // Clear input after successful checkin
-			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+
+			l.LoadingModal.SetText("Checking in files...")
+			l.Pages.ShowPage("loading")
+			l.App.tviewApp.SetFocus(l.LoadingModal)
+
+			go func() {
+				out, err := l.App.tfsClient.Checkin(filesToCkin, msg)
+				l.App.tviewApp.QueueUpdateDraw(func() {
+					l.Pages.HidePage("loading")
+					l.CheckinInput.SetText("") // Clear input after checkin attempt
+
+					if err != nil {
+						l.MainView.SetTitle(" Checkin Error ")
+						l.MainView.SetText(err.Error() + "\n" + out)
+					} else {
+						l.MainView.SetTitle(" Checkin Success ")
+						l.MainView.SetText(out)
+						
+						// Clear staged files on success
+						l.mu.Lock()
+						for k := range l.stagedFiles {
+							delete(l.stagedFiles, k)
+						}
+						l.mu.Unlock()
+						l.RefreshAll()
+					}
+					l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+				})
+			}()
 		}).
 		AddButton("No", func() {
 			l.Pages.HidePage("checkin_confirm2")
@@ -1048,4 +1103,57 @@ func extractFilePath(cleanText string) string {
 		return fields[0]
 	}
 	return cleanText
+}
+
+func parseTfStatusLine(raw string) (string, string) {
+	idx := strings.Index(raw, ":\\")
+	if idx > 0 {
+		prefix := strings.TrimSpace(raw[:idx-1])
+		fields := strings.Fields(prefix)
+		if len(fields) > 0 {
+			statusIdx := len(fields) - 1
+			for i := len(fields) - 1; i >= 0; i-- {
+				word := strings.ToLower(strings.Trim(fields[i], ","))
+				isStatus := false
+				for _, s := range []string{"edit", "add", "delete", "rename", "undelete", "branch", "merge", "lock"} {
+					if word == s {
+						isStatus = true
+						break
+					}
+				}
+				if isStatus {
+					statusIdx = i
+				} else {
+					break
+				}
+			}
+			
+			status := strings.Join(fields[statusIdx:], " ")
+			filename := strings.Join(fields[:statusIdx], " ")
+			
+			return filename, status
+		}
+	}
+	return raw, ""
+}
+
+func formatFileItem(raw string) string {
+	if strings.HasSuffix(strings.TrimSpace(raw), ":") {
+		return "📁 " + strings.TrimSuffix(strings.TrimSpace(raw), ":")
+	}
+
+	filename, status := parseTfStatusLine(raw)
+	
+	if status != "" {
+		parts := strings.Split(status, " ")
+		for i, p := range parts {
+			parts[i] = strings.Title(strings.Trim(p, ","))
+		}
+		
+		statusStr := strings.Join(parts, ", ")
+		statusStr = strings.ReplaceAll(statusStr, "Add", "New")
+		
+		return "(" + statusStr + ") - " + filename
+	}
+	return filename
 }
