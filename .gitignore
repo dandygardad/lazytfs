@@ -1,0 +1,45 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Mengabaikan file binary hasil build dari project ini
+lazytfs
+lazytfs.exe
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (jika kamu menggunakan go mod vendor)
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Profiling and coverage files
+*.prof
+coverage.txt
+
+# Antigravity
+.antigravity
