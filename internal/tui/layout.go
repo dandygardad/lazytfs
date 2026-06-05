@@ -672,10 +672,9 @@ func (l *Layout) toggleStaged(list *tview.List) {
 			}
 			
 			isHeader := strings.HasSuffix(strings.TrimSpace(rawItem), ":")
-			newState := !l.stagedFiles[rawItem]
-			l.stagedFiles[rawItem] = newState
 
 			if isHeader {
+				var children []string
 				found := false
 				for _, item := range l.filesData {
 					if item == rawItem {
@@ -686,9 +685,25 @@ func (l *Layout) toggleStaged(list *tview.List) {
 						if strings.HasSuffix(strings.TrimSpace(item), ":") {
 							break
 						}
-						l.stagedFiles[item] = newState
+						children = append(children, item)
 					}
 				}
+
+				if len(children) > 0 {
+					allStaged := true
+					for _, child := range children {
+						if !l.stagedFiles[child] {
+							allStaged = false
+							break
+						}
+					}
+					newState := !allStaged
+					for _, child := range children {
+						l.stagedFiles[child] = newState
+					}
+				}
+			} else {
+				l.stagedFiles[rawItem] = !l.stagedFiles[rawItem]
 			}
 		}
 	}
