@@ -1,6 +1,10 @@
 package tui
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -9,32 +13,42 @@ import (
 )
 
 type Layout struct {
-	App           *App
-	Pages         *tview.Pages
-	HelpModal     *tview.Modal
-	Flex          *tview.Flex
-	MainView      *tview.TextView
-	CommandLog    *tview.TextView
-	WorkspaceView *tview.TextView
-	FilesList     *tview.List
-	StagedList    *tview.List
-	HistoryList   *tview.List
-	BottomPages   *tview.Pages
-	BottomBar     *tview.TextView
-	SearchInput   *tview.InputField
+	App            *App
+	Pages          *tview.Pages
+	HelpModal      *tview.Modal
+	DirTree        *tview.TreeView
+	TreeModal      *tview.Flex
+	GetLatestModal *tview.Modal
+	ConflictModal  *tview.Modal
+	LoadingModal   *tview.Modal
+	ConflictsList  *tview.List
+	ConflictPage   *tview.Flex
+	Flex           *tview.Flex
+	MainView       *tview.TextView
+	CommandLog     *tview.TextView
+	WorkspaceView  *tview.TextView
+	FilesList      *tview.List
+	StagedList     *tview.List
+	HistoryList    *tview.List
+	BottomPages    *tview.Pages
+	BottomBar      *tview.TextView
+	SearchInput    *tview.InputField
 
 	panels             []tview.Primitive
 	currentPanel       int
 	searchQueryFiles   string
 	searchQueryHistory string
+	selectedPath       string
+	selectedConflict   string
 
 	// Caches
 	filesData     []string
 	workspaceData []string
 	historyData   []string
 
-	stagedFiles map[string]bool
-	showSplash  bool
+	stagedFiles  map[string]bool
+	showSplash   bool
+	isRefreshing bool
 
 	mu sync.Mutex // Protects caches
 }
@@ -48,7 +62,7 @@ func NewLayout(app *App) *Layout {
 
 	l.WorkspaceView = tview.NewTextView().SetDynamicColors(true).SetWrap(true).SetWordWrap(true)
 	l.WorkspaceView.SetTitle(" Status ").SetBorder(true).SetTitleColor(tcell.ColorGreen)
-	l.WorkspaceView.SetText(" lazytfs by dg")
+	l.WorkspaceView.SetText(" lazytfs - simple ui for tfs")
 
 	l.FilesList = tview.NewList().ShowSecondaryText(false)
 	l.FilesList.SetTitle(" Unstaged ").SetBorder(true).SetTitleColor(tcell.ColorYellow)
@@ -74,7 +88,7 @@ func NewLayout(app *App) *Layout {
 
 	l.BottomPages = tview.NewPages()
 	l.BottomBar = tview.NewTextView().SetDynamicColors(false)
-	l.BottomBar.SetText(" [q] quit | [?] help | [enter] select | [1-6] jump | [r] refresh ")
+	l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [enter] select | [1-6] jump | [r] refresh ")
 
 	l.SearchInput = tview.NewInputField().
 		SetLabel("Search: ").
@@ -84,13 +98,24 @@ func NewLayout(app *App) *Layout {
 		if l.currentPanel == 1 || l.currentPanel == 2 {
 			l.searchQueryFiles = strings.ToLower(text)
 			l.renderFilesPanel()
-		} else if l.currentPanel == 3 {
-			l.searchQueryHistory = strings.ToLower(text)
-			l.renderHistoryPanel()
 		}
 	})
 
 	l.SearchInput.SetDoneFunc(func(key tcell.Key) {
+		if l.currentPanel == 3 {
+			l.searchQueryHistory = strings.ToLower(l.SearchInput.GetText())
+			l.setLoadingState(l.HistoryList)
+			go func() {
+				outHistory, errHistory := l.App.tfsClient.GetHistory(l.searchQueryHistory)
+				l.mu.Lock()
+				l.historyData = parseOutput(outHistory, errHistory)
+				l.mu.Unlock()
+				l.App.tviewApp.QueueUpdateDraw(func() {
+					l.renderHistoryPanel()
+				})
+			}()
+		}
+
 		l.BottomPages.SwitchToPage("bar")
 		l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
 	})
@@ -132,6 +157,8 @@ func NewLayout(app *App) *Layout {
 [ q ] Quit
 [ r ] Refresh
 [ ? ] Show this help
+[ g ] Get Latest
+[ c ] Check Conflicts
 [ 1-4 ] Jump to left panels
 [ 5 ] Jump to Main View
 [ 6 ] Jump to Command Log
@@ -149,6 +176,11 @@ Panel Specific:
 			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
 		})
 
+	l.LoadingModal = tview.NewModal().SetText("Loading...")
+	l.LoadingModal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		return nil // Block all input
+	})
+
 	l.Pages = tview.NewPages()
 	l.Pages.AddPage("main", l.Flex, true, true)
 
@@ -157,17 +189,271 @@ Panel Specific:
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignCenter).
 		SetText(splashText)
-		
+
 	splashFlex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(tview.NewBox(), 0, 1, false).
 		AddItem(splashView, 4, 1, false).
 		AddItem(tview.NewBox(), 0, 1, false)
 
+	l.setupGetLatestUI()
+	l.setupConflictsUI()
+
 	l.Pages.AddPage("splash", splashFlex, true, true)
 	l.Pages.AddPage("help", l.HelpModal, false, false)
+	l.Pages.AddPage("getlatest_tree", l.TreeModal, true, false)
+	l.Pages.AddPage("getlatest_confirm", l.GetLatestModal, false, false)
+	l.Pages.AddPage("conflict_page", l.ConflictPage, true, false)
+	l.Pages.AddPage("conflict_modal", l.ConflictModal, false, false)
+	l.Pages.AddPage("loading", l.LoadingModal, false, false)
 
 	l.setupKeybindings()
 	return l
+}
+
+func (l *Layout) setupGetLatestUI() {
+	rootDir := "."
+	root := tview.NewTreeNode(rootDir).
+		SetColor(tcell.ColorRed)
+	l.DirTree = tview.NewTreeView().
+		SetRoot(root).
+		SetCurrentNode(root)
+	l.DirTree.SetBorder(true).SetTitle(" Select Folder to Get Latest ")
+
+	l.DirTree.SetFocusFunc(func() {
+		l.BottomBar.SetText(" [esc] cancel | [enter] select | [space] expand/collapse ")
+	})
+
+	l.TreeModal = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).
+			AddItem(nil, 0, 1, false).
+			AddItem(l.DirTree, 60, 1, true).
+			AddItem(nil, 0, 1, false), 20, 1, true).
+		AddItem(nil, 0, 1, false)
+
+	add := func(target *tview.TreeNode, path string) {
+		files, err := os.ReadDir(path)
+		if err != nil {
+			return
+		}
+		for _, file := range files {
+			if file.Name() == ".git" || file.Name() == ".antigravitycli" {
+				continue
+			}
+
+			color := tcell.ColorWhite
+			if file.IsDir() {
+				color = tcell.ColorBlue
+			}
+
+			node := tview.NewTreeNode(file.Name()).
+				SetReference(filepath.Join(path, file.Name())).
+				SetSelectable(true).
+				SetColor(color)
+			target.AddChild(node)
+		}
+	}
+	add(root, rootDir)
+
+	l.DirTree.SetSelectedFunc(func(node *tview.TreeNode) {
+		reference := node.GetReference()
+		if reference == nil {
+			l.selectedPath = rootDir
+		} else {
+			l.selectedPath = reference.(string)
+			if len(node.GetChildren()) == 0 {
+				add(node, l.selectedPath)
+			} else {
+				node.SetExpanded(!node.IsExpanded())
+			}
+		}
+	})
+
+	l.DirTree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEnter {
+			node := l.DirTree.GetCurrentNode()
+			ref := node.GetReference()
+			if ref == nil {
+				l.selectedPath = rootDir
+			} else {
+				l.selectedPath = ref.(string)
+			}
+			l.GetLatestModal.SetText("Are you sure to get latest this?\n" + l.selectedPath)
+			l.Pages.ShowPage("getlatest_confirm")
+			l.App.tviewApp.SetFocus(l.GetLatestModal)
+			return nil
+		}
+		if event.Key() == tcell.KeyEsc {
+			l.Pages.HidePage("getlatest_tree")
+			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+			return nil
+		}
+		return event
+	})
+
+	l.GetLatestModal = tview.NewModal().
+		AddButtons([]string{"ok", "cancel"}).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == "ok" {
+				l.Pages.HidePage("getlatest_confirm")
+				l.Pages.HidePage("getlatest_tree")
+				l.MainView.SetText("Getting latest for " + l.selectedPath + "...")
+				l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+
+				go func() {
+					out, err := l.App.tfsClient.GetLatest(l.selectedPath)
+					l.App.tviewApp.QueueUpdateDraw(func() {
+						if err != nil && strings.Contains(strings.ToLower(out), "conflict") {
+							// Show conflicts page
+							l.checkAndShowConflicts(l.selectedPath)
+						} else {
+							if err != nil {
+								l.MainView.SetText("Error getting latest:\n" + err.Error() + "\n" + out)
+							} else {
+								l.MainView.SetText("Get latest success:\n" + out)
+								l.RefreshAll()
+							}
+						}
+					})
+				}()
+			} else {
+				l.Pages.HidePage("getlatest_confirm")
+				l.App.tviewApp.SetFocus(l.DirTree)
+			}
+		})
+}
+
+func (l *Layout) checkAndShowConflicts(path string) {
+	l.MainView.SetText("Checking for conflicts in " + path + "...")
+	go func() {
+		conflicts, err := l.App.tfsClient.GetConflicts(path)
+		l.App.tviewApp.QueueUpdateDraw(func() {
+			if err != nil {
+				l.MainView.SetText("Error checking conflicts:\n" + err.Error())
+				return
+			}
+			if len(conflicts) == 0 {
+				l.MainView.SetText("No conflicts detected in " + path)
+				return
+			}
+
+			l.ConflictsList.Clear()
+			for i, conflict := range conflicts {
+				path := conflict.Path
+				if rel, err := filepath.Rel(".", path); err == nil && !strings.HasPrefix(rel, "..") {
+					path = rel
+				}
+				l.ConflictsList.AddItem(path, conflict.Reason, 0, nil)
+				if i < len(conflicts)-1 {
+					l.ConflictsList.AddItem(" ", "", 0, nil)
+				}
+			}
+			l.Pages.ShowPage("conflict_page")
+			l.App.tviewApp.SetFocus(l.ConflictsList)
+		})
+	}()
+}
+
+func (l *Layout) setupConflictsUI() {
+	l.ConflictsList = tview.NewList().ShowSecondaryText(true)
+	l.ConflictsList.SetMainTextColor(tcell.ColorYellow)
+	l.ConflictsList.SetSecondaryTextColor(tcell.ColorGray)
+	l.ConflictsList.SetSelectedBackgroundColor(tcell.ColorDarkRed)
+	l.ConflictsList.SetSelectedTextColor(tcell.ColorWhite)
+	l.ConflictsList.SetTitle(" Conflicted Files (Enter to resolve) ").SetBorder(true).SetTitleColor(tcell.ColorRed)
+
+	l.ConflictsList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			l.Pages.HidePage("conflict_page")
+			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+			return nil
+		}
+		return event
+	})
+
+	var lastSelected int
+	l.ConflictsList.SetChangedFunc(func(i int, mainText string, secondaryText string, shortcut rune) {
+		if strings.TrimSpace(mainText) == "" {
+			if i > lastSelected && i+1 < l.ConflictsList.GetItemCount() {
+				l.ConflictsList.SetCurrentItem(i + 1)
+			} else if i < lastSelected && i-1 >= 0 {
+				l.ConflictsList.SetCurrentItem(i - 1)
+			}
+		} else {
+			lastSelected = i
+		}
+	})
+
+	l.ConflictsList.SetSelectedFunc(func(i int, mainText string, secondaryText string, shortcut rune) {
+		if strings.TrimSpace(mainText) == "" {
+			return
+		}
+		l.selectedConflict = mainText
+		l.ConflictModal.SetText("Resolve conflict for:\n" + l.selectedConflict)
+		l.Pages.ShowPage("conflict_modal")
+		l.App.tviewApp.SetFocus(l.ConflictModal)
+	})
+
+	helpText := tview.NewTextView().SetText(" [esc] back to main view | [enter] resolve file ").SetDynamicColors(false)
+
+	l.ConflictPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(l.ConflictsList, 0, 1, true).
+		AddItem(helpText, 1, 0, false)
+
+	l.ConflictModal = tview.NewModal().
+		AddButtons([]string{"Take Server", "Keep Mine", "Cancel"}).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == "Cancel" {
+				l.Pages.HidePage("conflict_modal")
+				l.App.tviewApp.SetFocus(l.ConflictsList)
+				return
+			}
+
+			takeServer := buttonLabel == "Take Server"
+			l.Pages.HidePage("conflict_modal")
+			l.LoadingModal.SetText("Resolving conflict for " + l.selectedConflict + "...")
+			l.Pages.ShowPage("loading")
+			l.App.tviewApp.SetFocus(l.LoadingModal)
+			l.MainView.SetText("Resolving conflict for " + l.selectedConflict + "...")
+
+			go func() {
+				out, err := l.App.tfsClient.ResolveConflicts(l.selectedConflict, takeServer)
+				l.App.tviewApp.QueueUpdateDraw(func() {
+					l.Pages.HidePage("loading")
+					
+					if err != nil {
+						l.MainView.SetText("Error resolving conflict:\n" + err.Error() + "\n" + out)
+						l.App.tviewApp.SetFocus(l.ConflictsList)
+					} else {
+						l.MainView.SetText("Conflict resolved:\n" + out)
+						// Remove from list
+						idx := l.ConflictsList.GetCurrentItem()
+						l.ConflictsList.RemoveItem(idx)
+						
+						// Remove spacer if it exists
+						if idx < l.ConflictsList.GetItemCount() {
+							mainText, _ := l.ConflictsList.GetItemText(idx)
+							if strings.TrimSpace(mainText) == "" {
+								l.ConflictsList.RemoveItem(idx)
+							}
+						} else if idx-1 >= 0 {
+							mainText, _ := l.ConflictsList.GetItemText(idx - 1)
+							if strings.TrimSpace(mainText) == "" {
+								l.ConflictsList.RemoveItem(idx - 1)
+							}
+						}
+						
+						if l.ConflictsList.GetItemCount() == 0 {
+							l.Pages.HidePage("conflict_page")
+							l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+							l.RefreshAll()
+						} else {
+							l.App.tviewApp.SetFocus(l.ConflictsList)
+						}
+					}
+				})
+			}()
+		})
 }
 
 func (l *Layout) setupKeybindings() {
@@ -185,6 +471,13 @@ func (l *Layout) setupKeybindings() {
 			case '?':
 				l.Pages.ShowPage("help")
 				l.App.tviewApp.SetFocus(l.HelpModal)
+				return nil
+			case 'g':
+				l.Pages.ShowPage("getlatest_tree")
+				l.App.tviewApp.SetFocus(l.DirTree)
+				return nil
+			case 'c':
+				l.checkAndShowConflicts(".")
 				return nil
 			case '1':
 				l.setFocus(0)
@@ -221,13 +514,13 @@ func (l *Layout) setupKeybindings() {
 		}
 		l.MainView.SetTitle(" Status ")
 		l.MainView.SetText("Workspace Information:\n\n" + data)
-		l.BottomBar.SetText(" [q] quit | [?] help | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [1-6] jump | [r] refresh ")
 	})
 
 	bindFilesList := func(list *tview.List) {
 		list.SetFocusFunc(func() {
 			l.MainView.SetTitle(" Main View ")
-			l.BottomBar.SetText(" [q] quit | [?] help | [enter] diff | [space] stage/unstage | [/] search | [1-6] jump | [r] refresh ")
+			l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [enter] diff | [space] stage/unstage | [/] search | [1-6] jump | [r] refresh ")
 		})
 		list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 			if event.Key() == tcell.KeyRune {
@@ -281,7 +574,7 @@ func (l *Layout) setupKeybindings() {
 
 	l.HistoryList.SetFocusFunc(func() {
 		l.MainView.SetTitle(" Main View ")
-		l.BottomBar.SetText(" [q] quit | [?] help | [enter] select | [/] search author | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [enter] select | [/] search author | [1-6] jump | [r] refresh ")
 	})
 	l.HistoryList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyRune {
@@ -297,15 +590,61 @@ func (l *Layout) setupKeybindings() {
 		return event
 	})
 	l.HistoryList.SetSelectedFunc(func(i int, mainText string, secondaryText string, shortcut rune) {
-		l.MainView.SetText("Selected:\n" + mainText)
+		fields := strings.Fields(mainText)
+		if len(fields) == 0 {
+			return
+		}
+		changesetID := fields[0]
+
+		l.MainView.SetText("Loading changeset " + changesetID + "...")
+		go func() {
+			detailOut, detailErr := l.App.tfsClient.GetChangesetDetail(changesetID)
+
+			l.App.tviewApp.QueueUpdateDraw(func() {
+				if detailErr != nil {
+					l.MainView.SetText("Error getting changeset detail:\n" + detailErr.Error() + "\n\n" + detailOut)
+					return
+				}
+
+				idx := strings.Index(detailOut, "Items:")
+				if idx != -1 {
+					detailOut = strings.TrimSpace(detailOut[:idx])
+				}
+
+				l.MainView.SetText(tview.Escape(detailOut))
+			})
+
+			var collectionURL string
+			l.mu.Lock()
+			for _, line := range l.workspaceData {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "Collection:") {
+					collectionURL = strings.TrimSpace(strings.TrimPrefix(trimmed, "Collection:"))
+					break
+				}
+			}
+			l.mu.Unlock()
+
+			if collectionURL != "" {
+				url := strings.TrimRight(collectionURL, "/") + "/_versionControl/changeset/" + changesetID
+				switch runtime.GOOS {
+				case "windows":
+					exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+				case "darwin":
+					exec.Command("open", url).Start()
+				case "linux":
+					exec.Command("xdg-open", url).Start()
+				}
+			}
+		}()
 	})
 
 	l.MainView.SetFocusFunc(func() {
-		l.BottomBar.SetText(" [q] quit | [?] help | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [1-6] jump | [r] refresh ")
 	})
 
 	l.CommandLog.SetFocusFunc(func() {
-		l.BottomBar.SetText(" [q] quit | [?] help | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [1-6] jump | [r] refresh ")
 	})
 }
 
@@ -340,6 +679,11 @@ func (l *Layout) setFocus(index int) {
 
 func (l *Layout) RefreshAll() {
 	l.mu.Lock()
+	if l.isRefreshing {
+		l.mu.Unlock()
+		return
+	}
+	l.isRefreshing = true
 	l.filesData = nil
 	l.workspaceData = nil
 	l.historyData = nil
@@ -365,7 +709,7 @@ func (l *Layout) fetchData() {
 	l.workspaceData = parseOutput(outWorkspace, errWorkspace)
 	l.mu.Unlock()
 	l.App.tviewApp.QueueUpdateDraw(func() {
-		l.WorkspaceView.SetText(" lazytfs by dg")
+		l.WorkspaceView.SetText(" lazytfs - simple ui for tfs")
 
 		// If currently focused, trigger focus func to update main view
 		if l.App.tviewApp.GetFocus() == l.WorkspaceView {
@@ -385,7 +729,7 @@ func (l *Layout) fetchData() {
 	})
 
 	// History
-	outHistory, errHistory := l.App.tfsClient.GetHistory()
+	outHistory, errHistory := l.App.tfsClient.GetHistory(l.searchQueryHistory)
 	l.mu.Lock()
 	l.historyData = parseOutput(outHistory, errHistory)
 	l.mu.Unlock()
@@ -397,6 +741,9 @@ func (l *Layout) fetchData() {
 	l.App.tviewApp.QueueUpdateDraw(func() {
 		l.renderHistoryPanel()
 		l.Pages.RemovePage("splash")
+		l.mu.Lock()
+		l.isRefreshing = false
+		l.mu.Unlock()
 	})
 }
 
@@ -497,10 +844,6 @@ func (l *Layout) renderHistoryPanel() {
 	for _, item := range l.historyData {
 		if item == "(None)" || strings.HasPrefix(item, "Error:") {
 			l.HistoryList.AddItem(item, "", 0, nil)
-			continue
-		}
-
-		if l.searchQueryHistory != "" && !strings.Contains(strings.ToLower(item), l.searchQueryHistory) {
 			continue
 		}
 

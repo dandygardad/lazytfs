@@ -40,8 +40,24 @@ func (c *Client) GetBranches() (string, error) {
 }
 
 // GetHistory returns the output of `tf history`.
-func (c *Client) GetHistory() (string, error) {
-	return c.execute("history", ".", "/r", "/noprompt", "/stopafter:50")
+func (c *Client) GetHistory(author string) (string, error) {
+	args := []string{"history", ".", "/r", "/noprompt", "/stopafter:50"}
+	if author != "" {
+		args = append(args, "/user:"+author)
+	}
+	return c.execute(args...)
+}
+
+// GetChangesetDetail returns the details of a specific changeset.
+func (c *Client) GetChangesetDetail(changesetID string) (string, error) {
+	return c.execute("changeset", changesetID, "/noprompt")
+}
+
+// GetChangesetDiff returns the diff of a specific changeset.
+func (c *Client) GetChangesetDiff(changesetID string) (string, error) {
+	// Compare the changeset with its immediate predecessor
+	versionSpec := "C" + changesetID + "~C" + changesetID
+	return c.execute("diff", "$/", "/version:"+versionSpec, "/recursive", "/format:Unified")
 }
 
 // GetShelvesets returns the output of `tf shelvesets`.
@@ -57,4 +73,61 @@ func (c *Client) GetDiff(filename string) (string, error) {
 // GetWorkspace returns the current workspace info.
 func (c *Client) GetWorkspace() (string, error) {
 	return c.execute("workfold")
+}
+
+// GetLatest returns the output of `tf get` for a specific path.
+func (c *Client) GetLatest(path string) (string, error) {
+	// Use /noprompt so it doesn't block waiting for input in case of conflicts
+	return c.execute("get", path, "/recursive", "/noprompt")
+}
+
+// ResolveConflicts resolves conflicts for a specific path by taking the server's version or keeping yours.
+func (c *Client) ResolveConflicts(path string, takeServer bool) (string, error) {
+	resolution := "/auto:KeepYours"
+	if takeServer {
+		resolution = "/auto:TakeTheirs"
+	}
+	return c.execute("resolve", path, "/recursive", resolution)
+}
+
+// Conflict represents a file conflict with its path and reason.
+type Conflict struct {
+	Path   string
+	Reason string
+}
+
+// GetConflicts returns a list of files with conflicts in the specified path.
+func (c *Client) GetConflicts(path string) ([]Conflict, error) {
+	out, err := c.execute("resolve", path, "/recursive", "/preview", "/noprompt")
+	if err != nil {
+		// tf might return exit code 1 if there are conflicts, so we don't return early if out != ""
+		if out == "" {
+			return nil, err
+		}
+	}
+
+	var conflicts []Conflict
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && (strings.Contains(trimmed, "\\") || strings.Contains(trimmed, "/")) {
+			filePath := trimmed
+			reason := ""
+			idx := strings.Index(trimmed, ": ")
+			if idx != -1 {
+				part1 := strings.TrimSpace(trimmed[:idx])
+				part2 := strings.TrimSpace(trimmed[idx+2:])
+				
+				if strings.Contains(part1, "\\") || strings.Contains(part1, "/") {
+					filePath = part1
+					reason = part2
+				} else if strings.Contains(part2, "\\") || strings.Contains(part2, "/") {
+					filePath = part2
+					reason = part1
+				}
+			}
+			conflicts = append(conflicts, Conflict{Path: filePath, Reason: reason})
+		}
+	}
+	return conflicts, nil
 }
