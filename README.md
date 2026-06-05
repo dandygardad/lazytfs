@@ -7,7 +7,9 @@ A terminal UI for Team Foundation Server (TFS) version control inspired by `lazy
 - **4-Panel Layout:** View Workspace Status, Unstaged Files, Staged Files, and Changesets (History).
 - **Interactive Diff Viewing:** Select a file to view a colorized diff in the main view.
 - **Stage/Unstage:** Easily stage and unstage files using the `[Space]` bar.
-- **Context-Aware Search (`/`):** Filter files by name, or filter changesets by author name.
+- **Get Latest (`g`):** Open a directory tree to fetch the latest server versions recursively.
+- **Conflict Resolution (`c`):** Dedicated UI to handle conflicts per-file (Take Server vs. Keep Mine) seamlessly.
+- **Server-Side History Search (`/`):** Filter changesets by fetching directly from the TFS server based on author or keywords.
 - **Command Log:** Real-time visibility into the underlying `tf` commands being executed in the background.
 - **Fast Navigation:** Jump between panels instantly using hotkeys `[1-6]`.
 - **Help Modal:** Press `[?]` to view a list of all available global and panel-specific hotkeys.
@@ -33,6 +35,8 @@ Run the executable inside your mapped TFS workspace folder:
 **Global:**
 - `[q]` - Quit
 - `[r]` - Refresh data
+- `[g]` - Get Latest (opens directory tree)
+- `[c]` - Check and resolve conflicts
 - `[?]` - Show help menu
 - `[1-4]` - Jump to left panels (Status, Unstaged, Staged, Changesets)
 - `[5]` - Jump to Main View (useful for scrolling long diffs)
@@ -41,7 +45,7 @@ Run the executable inside your mapped TFS workspace folder:
 **Panel Specific (Files / History):**
 - `[Space]` - Stage/Unstage file
 - `[/]` - Search files or authors
-- `[Enter]` - View diff / Select
+- `[Enter]` - View diff / Select / Open Changeset URL
 
 ---
 *Built by [dg](https://dandygarda.com)*
