@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,12 +16,17 @@ import (
 type Layout struct {
 	App            *App
 	Pages          *tview.Pages
-	HelpModal      *tview.Modal
+	HelpModal      *CustomModal
 	DirTree        *tview.TreeView
 	TreeModal      *tview.Flex
-	GetLatestModal *tview.Modal
-	ConflictModal  *tview.Modal
-	LoadingModal   *tview.Modal
+	GetLatestModal *CustomModal
+	ConflictModal  *CustomModal
+	LoadingModal   *CustomModal
+	CheckinPage      *tview.Flex
+	CheckinInput     *tview.InputField
+	CheckinPreview   *tview.TextView
+	CheckinConfirm1  *CustomModal
+	CheckinConfirm2  *tview.Flex
 	ConflictsList  *tview.List
 	ConflictPage   *tview.Flex
 	Flex           *tview.Flex
@@ -36,7 +42,8 @@ type Layout struct {
 
 	panels             []tview.Primitive
 	currentPanel       int
-	searchQueryFiles   string
+	searchQueryUnstaged string
+	searchQueryStaged   string
 	searchQueryHistory string
 	selectedPath       string
 	selectedConflict   string
@@ -88,15 +95,18 @@ func NewLayout(app *App) *Layout {
 
 	l.BottomPages = tview.NewPages()
 	l.BottomBar = tview.NewTextView().SetDynamicColors(false)
-	l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [enter] select | [1-6] jump | [r] refresh ")
+	l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [C] checkin | [enter] select | [1-6] jump | [r] refresh ")
 
 	l.SearchInput = tview.NewInputField().
 		SetLabel("Search: ").
 		SetFieldWidth(0)
 
 	l.SearchInput.SetChangedFunc(func(text string) {
-		if l.currentPanel == 1 || l.currentPanel == 2 {
-			l.searchQueryFiles = strings.ToLower(text)
+		if l.currentPanel == 1 {
+			l.searchQueryUnstaged = strings.ToLower(text)
+			l.renderFilesPanel()
+		} else if l.currentPanel == 2 {
+			l.searchQueryStaged = strings.ToLower(text)
 			l.renderFilesPanel()
 		}
 	})
@@ -159,6 +169,7 @@ func NewLayout(app *App) *Layout {
 [ ? ] Show this help
 [ g ] Get Latest
 [ c ] Check Conflicts
+[ C ] Checkin Staged Files
 [ 1-4 ] Jump to left panels
 [ 5 ] Jump to Main View
 [ 6 ] Jump to Command Log
@@ -168,15 +179,12 @@ Panel Specific:
 [ / ] Search files
 [ Enter ] View diff / Select`
 
-	l.HelpModal = tview.NewModal().
-		SetText(helpText).
-		AddButtons([]string{"Close"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-			l.Pages.HidePage("help")
-			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
-		})
+	l.HelpModal = NewCustomModal(helpText, []string{"Close"}, func(buttonIndex int, buttonLabel string) {
+		l.Pages.HidePage("help")
+		l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+	})
 
-	l.LoadingModal = tview.NewModal().SetText("Loading...")
+	l.LoadingModal = NewCustomModal("Loading...", nil, nil)
 	l.LoadingModal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		return nil // Block all input
 	})
@@ -197,14 +205,18 @@ Panel Specific:
 
 	l.setupGetLatestUI()
 	l.setupConflictsUI()
+	l.setupCheckinUI()
 
 	l.Pages.AddPage("splash", splashFlex, true, true)
-	l.Pages.AddPage("help", l.HelpModal, false, false)
+	l.Pages.AddPage("help", l.HelpModal.Flex, true, false)
 	l.Pages.AddPage("getlatest_tree", l.TreeModal, true, false)
-	l.Pages.AddPage("getlatest_confirm", l.GetLatestModal, false, false)
+	l.Pages.AddPage("getlatest_confirm", l.GetLatestModal.Flex, true, false)
 	l.Pages.AddPage("conflict_page", l.ConflictPage, true, false)
-	l.Pages.AddPage("conflict_modal", l.ConflictModal, false, false)
-	l.Pages.AddPage("loading", l.LoadingModal, false, false)
+	l.Pages.AddPage("conflict_modal", l.ConflictModal.Flex, true, false)
+	l.Pages.AddPage("loading", l.LoadingModal.Flex, true, false)
+	l.Pages.AddPage("checkin_page", l.CheckinPage, true, false)
+	l.Pages.AddPage("checkin_confirm1", l.CheckinConfirm1.Flex, true, false)
+	l.Pages.AddPage("checkin_confirm2", l.CheckinConfirm2, true, false)
 
 	l.setupKeybindings()
 	return l
@@ -291,9 +303,7 @@ func (l *Layout) setupGetLatestUI() {
 		return event
 	})
 
-	l.GetLatestModal = tview.NewModal().
-		AddButtons([]string{"ok", "cancel"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+	l.GetLatestModal = NewCustomModal("", []string{"ok", "cancel"}, func(buttonIndex int, buttonLabel string) {
 			if buttonLabel == "ok" {
 				l.Pages.HidePage("getlatest_confirm")
 				l.Pages.HidePage("getlatest_tree")
@@ -400,9 +410,7 @@ func (l *Layout) setupConflictsUI() {
 		AddItem(l.ConflictsList, 0, 1, true).
 		AddItem(helpText, 1, 0, false)
 
-	l.ConflictModal = tview.NewModal().
-		AddButtons([]string{"Take Server", "Keep Mine", "Cancel"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+	l.ConflictModal = NewCustomModal("", []string{"Take Server", "Keep Mine", "Cancel"}, func(buttonIndex int, buttonLabel string) {
 			if buttonLabel == "Cancel" {
 				l.Pages.HidePage("conflict_modal")
 				l.App.tviewApp.SetFocus(l.ConflictsList)
@@ -479,6 +487,9 @@ func (l *Layout) setupKeybindings() {
 			case 'c':
 				l.checkAndShowConflicts(".")
 				return nil
+			case 'C':
+				l.showCheckinFlow()
+				return nil
 			case '1':
 				l.setFocus(0)
 				return nil
@@ -514,13 +525,13 @@ func (l *Layout) setupKeybindings() {
 		}
 		l.MainView.SetTitle(" Status ")
 		l.MainView.SetText("Workspace Information:\n\n" + data)
-		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [C] checkin | [1-6] jump | [r] refresh ")
 	})
 
-	bindFilesList := func(list *tview.List) {
+	bindFilesList := func(list *tview.List, panelIndex int) {
 		list.SetFocusFunc(func() {
 			l.MainView.SetTitle(" Main View ")
-			l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [enter] diff | [space] stage/unstage | [/] search | [1-6] jump | [r] refresh ")
+			l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [C] checkin | [enter] diff | [space] stage/unstage | [/] search | [1-6] jump | [r] refresh ")
 		})
 		list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 			if event.Key() == tcell.KeyRune {
@@ -529,8 +540,13 @@ func (l *Layout) setupKeybindings() {
 					l.toggleStaged(list)
 					return nil
 				case '/':
-					l.SearchInput.SetLabel("Search Files: ")
-					l.SearchInput.SetText(l.searchQueryFiles)
+					if panelIndex == 1 {
+						l.SearchInput.SetLabel("Search Unstaged: ")
+						l.SearchInput.SetText(l.searchQueryUnstaged)
+					} else if panelIndex == 2 {
+						l.SearchInput.SetLabel("Search Staged: ")
+						l.SearchInput.SetText(l.searchQueryStaged)
+					}
 					l.BottomPages.SwitchToPage("search")
 					l.App.tviewApp.SetFocus(l.SearchInput)
 					return nil
@@ -543,16 +559,7 @@ func (l *Layout) setupKeybindings() {
 				return
 			}
 			cleanText := mainText
-			var filename string
-			idx := strings.Index(cleanText, ":\\")
-			if idx > 0 {
-				filename = strings.TrimSpace(cleanText[idx-1:])
-			} else {
-				fields := strings.Fields(cleanText)
-				if len(fields) > 0 {
-					filename = fields[0]
-				}
-			}
+			filename := extractFilePath(cleanText)
 			if filename != "" {
 				l.MainView.SetText("Loading diff for " + filename + "...")
 				go func() {
@@ -569,12 +576,12 @@ func (l *Layout) setupKeybindings() {
 		})
 	}
 
-	bindFilesList(l.FilesList)
-	bindFilesList(l.StagedList)
+	bindFilesList(l.FilesList, 1)
+	bindFilesList(l.StagedList, 2)
 
 	l.HistoryList.SetFocusFunc(func() {
 		l.MainView.SetTitle(" Main View ")
-		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [enter] select | [/] search author | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [C] checkin | [enter] select | [/] search author | [1-6] jump | [r] refresh ")
 	})
 	l.HistoryList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyRune {
@@ -640,11 +647,11 @@ func (l *Layout) setupKeybindings() {
 	})
 
 	l.MainView.SetFocusFunc(func() {
-		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [C] checkin | [1-6] jump | [r] refresh ")
 	})
 
 	l.CommandLog.SetFocusFunc(func() {
-		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [1-6] jump | [r] refresh ")
+		l.BottomBar.SetText(" [q] quit | [?] help | [g] get latest | [c] conflicts | [C] checkin | [1-6] jump | [r] refresh ")
 	})
 }
 
@@ -813,13 +820,15 @@ func (l *Layout) renderFilesPanel() {
 			continue
 		}
 
-		if l.searchQueryFiles != "" && !strings.Contains(strings.ToLower(item), l.searchQueryFiles) {
-			continue
-		}
-
 		if l.stagedFiles[item] {
+			if l.searchQueryStaged != "" && !strings.Contains(strings.ToLower(item), l.searchQueryStaged) {
+				continue
+			}
 			l.StagedList.AddItem(item, "", 0, nil)
 		} else {
+			if l.searchQueryUnstaged != "" && !strings.Contains(strings.ToLower(item), l.searchQueryUnstaged) {
+				continue
+			}
 			l.FilesList.AddItem(item, "", 0, nil)
 		}
 	}
@@ -867,4 +876,176 @@ func colorizeDiff(diff string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (l *Layout) setupCheckinUI() {
+	// 1. Input Modal
+	l.CheckinInput = tview.NewInputField().
+		SetLabel("Checkin Message: ").
+		SetFieldWidth(50)
+	
+	l.CheckinPreview = tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true).
+		SetWordWrap(true)
+	l.CheckinPreview.SetTitle(" Files to Checkin ").
+		SetBorder(true)
+
+	innerModal := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(l.CheckinPreview, 0, 1, false).
+		AddItem(tview.NewBox(), 1, 0, false). // Spacer
+		AddItem(l.CheckinInput, 1, 0, true)
+	innerModal.SetBorder(true).SetTitle(" Checkin ")
+
+	l.CheckinPage = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).
+			AddItem(nil, 0, 1, false).
+			AddItem(innerModal, 80, 1, true).
+			AddItem(nil, 0, 1, false), 20, 1, true).
+		AddItem(nil, 0, 1, false)
+
+
+	l.CheckinInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			if strings.TrimSpace(l.CheckinInput.GetText()) == "" {
+				return
+			}
+			l.Pages.ShowPage("checkin_confirm1")
+			l.App.tviewApp.SetFocus(l.CheckinConfirm1)
+		} else if key == tcell.KeyEsc {
+			l.Pages.HidePage("checkin_page")
+			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+		}
+	})
+
+	// 2. Confirm 1
+	l.CheckinConfirm1 = NewCustomModal("Are you sure to checkin this data?", []string{"Yes", "No"}, func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == "Yes" {
+				l.Pages.HidePage("checkin_confirm1")
+				l.Pages.ShowPage("checkin_confirm2")
+				l.App.tviewApp.SetFocus(l.CheckinConfirm2)
+			} else {
+				l.Pages.HidePage("checkin_confirm1")
+				l.App.tviewApp.SetFocus(l.CheckinInput)
+			}
+		})
+
+	// 3. Confirm 2 with custom colored buttons
+	form := tview.NewForm().
+		AddButton("Yes", func() {
+			l.Pages.HidePage("checkin_confirm2")
+			l.Pages.HidePage("checkin_page")
+			
+			// DEBUG: Print command to main view
+			var filesToCkin []string
+			l.mu.Lock()
+			for f, staged := range l.stagedFiles {
+				if staged {
+					extractedPath := extractFilePath(f)
+					if extractedPath != "" {
+						filesToCkin = append(filesToCkin, `"`+extractedPath+`"`)
+					}
+				}
+			}
+			l.mu.Unlock()
+			
+			msg := l.CheckinInput.GetText()
+			cmdStr := fmt.Sprintf("tf checkin %s /comment:\"%s\"", strings.Join(filesToCkin, " "), msg)
+			
+			l.MainView.SetTitle(" Checkin Debug Output ")
+			l.MainView.SetText("Command that would be executed:\n\n" + cmdStr)
+			l.CheckinInput.SetText("") // Clear input after successful checkin
+			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
+		}).
+		AddButton("No", func() {
+			l.Pages.HidePage("checkin_confirm2")
+			l.App.tviewApp.SetFocus(l.CheckinInput)
+		})
+	
+	form.SetButtonsAlign(tview.AlignCenter)
+
+	for i := 0; i < form.GetButtonCount(); i++ {
+		btn := form.GetButton(i)
+		originalLabel := btn.GetLabel()
+		btn.SetFocusFunc(func() {
+			btn.SetLabel("> " + originalLabel + " <")
+		})
+		btn.SetBlurFunc(func() {
+			btn.SetLabel(originalLabel)
+		})
+	}
+
+	// Color the buttons
+	buttonYes := form.GetButton(0)
+	buttonYes.SetBackgroundColor(tcell.ColorGreen)
+	buttonYes.SetLabelColor(tcell.ColorWhite)
+	
+	buttonNo := form.GetButton(1)
+	buttonNo.SetBackgroundColor(tcell.ColorRed)
+	buttonNo.SetLabelColor(tcell.ColorWhite)
+
+	textView := tview.NewTextView().
+		SetTextAlign(tview.AlignCenter).
+		SetText("\nAre you really sure to checkin this data?\n")
+
+	innerFlex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(textView, 4, 1, false).
+		AddItem(form, 3, 1, true)
+	innerFlex.SetBorder(true).SetTitle(" Final Confirmation ")
+
+	l.CheckinConfirm2 = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).
+			AddItem(nil, 0, 1, false).
+			AddItem(innerFlex, 50, 1, true).
+			AddItem(nil, 0, 1, false), 9, 1, true).
+		AddItem(nil, 0, 1, false)
+
+	// Ensure escape goes back, and allow left/right navigation
+	form.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			l.Pages.HidePage("checkin_confirm2")
+			l.App.tviewApp.SetFocus(l.CheckinInput)
+			return nil
+		} else if event.Key() == tcell.KeyLeft {
+			return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+		} else if event.Key() == tcell.KeyRight {
+			return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
+		}
+		return event
+	})
+}
+
+func (l *Layout) showCheckinFlow() {
+	l.mu.Lock()
+	var staged []string
+	for file, isStaged := range l.stagedFiles {
+		if isStaged {
+			staged = append(staged, file)
+		}
+	}
+	l.mu.Unlock()
+
+	if len(staged) == 0 {
+		l.MainView.SetTitle(" Error ")
+		l.MainView.SetText("No files staged for checkin.")
+		return
+	}
+
+	l.CheckinPreview.SetText(strings.Join(staged, "\n"))
+	l.Pages.ShowPage("checkin_page")
+	l.App.tviewApp.SetFocus(l.CheckinInput)
+}
+
+func extractFilePath(cleanText string) string {
+	idx := strings.Index(cleanText, ":\\")
+	if idx > 0 {
+		return strings.TrimSpace(cleanText[idx-1:])
+	}
+	fields := strings.Fields(cleanText)
+	if len(fields) > 0 {
+		return fields[0]
+	}
+	return cleanText
 }
