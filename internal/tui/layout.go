@@ -755,6 +755,16 @@ func (l *Layout) setLoadingState(list *tview.List) {
 func (l *Layout) fetchData() {
 	// Workspace
 	outWorkspace, errWorkspace := l.App.tfsClient.GetWorkspace()
+	if errWorkspace != nil && strings.Contains(strings.ToLower(outWorkspace), "unable to determine") {
+		l.App.tviewApp.QueueUpdateDraw(func() {
+			modal := NewCustomModal("This project is not registered in TFS project, please configure via Visual studio", []string{"OK"}, func(buttonIndex int, buttonLabel string) {
+				l.App.tviewApp.Stop()
+			})
+			l.Pages.AddPage("not_registered", modal.Flex, true, true)
+			l.App.tviewApp.SetFocus(modal)
+		})
+		return
+	}
 	l.mu.Lock()
 	l.workspaceData = parseOutput(outWorkspace, errWorkspace)
 	l.mu.Unlock()

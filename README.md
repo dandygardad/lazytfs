@@ -21,20 +21,18 @@ A terminal UI for Team Foundation Server (TFS) version control inspired by `lazy
 
 ## Installation
 
-### Option 1: Download Release
-You can download the latest pre-built `lazytfs.exe` directly from the [GitHub Releases](https://github.com/dandygardad/lazytfs/releases) page. The binaries are automatically built using GitHub Actions.
+You can easily install `lazytfs` using `go install`. This requires you to have Go installed on your machine.
 
-### Option 2: Build from Source
 ```bash
-git clone https://github.com/dandygardad/lazytfs.git
-cd lazytfs
-go build -o lazytfs.exe ./cmd/main.go
+go install github.com/dandygardad/lazytfs@latest
 ```
 
+This will download, compile, and install the `lazytfs` binary into your `$GOPATH/bin` folder. Make sure your Go bin directory is added to your system's `PATH`.
+
 ## Usage
-Run the executable inside your mapped TFS workspace folder:
+Run the tool inside your mapped TFS workspace folder:
 ```bash
-./lazytfs.exe
+lazytfs
 ```
 
 ### Hotkeys
