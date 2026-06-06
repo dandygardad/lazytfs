@@ -8,7 +8,6 @@ A terminal UI for Team Foundation Server (TFS) version control inspired by `lazy
 - **Interactive Diff Viewing:** Select a file to view a colorized diff in the main view.
 - **Smart Staging:** 
   - Stage and unstage individual files using the `[Space]` bar.
-  - **Tree-like Folder Staging**: Press `[Space]` on a folder header (`📁 $/...`) to instantly stage or unstage all files under that folder.
 - **Clean Status UI**: File statuses are elegantly formatted (e.g., `(Edit) - File.cs`, `(New) - File.cs`).
 - **Unified Checkin Flow (`C`):** A beautiful 3-step modal UI to preview staged files, write your checkin message, and confirm the checkin.
 - **Get Latest (`g`):** Open a directory tree to fetch the latest server versions recursively.
