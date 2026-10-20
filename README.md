@@ -32,6 +32,10 @@ go install github.com/dandygardad/lazytfs@latest
 
 This will download, compile, and install the `lazytfs` binary into your `$GOPATH/bin` folder. Make sure your Go bin directory is added to your system's `PATH`.
 
+Or download `lazytfs.exe` from the [latest release](https://github.com/dandygardad/lazytfs/releases/latest) and put it in a folder on your `PATH`.
+
+Check the installed version with `lazytfs --version`.
+
 ## Usage
 Run the tool inside your mapped TFS workspace folder:
 ```bash
