@@ -29,6 +29,10 @@ type Layout struct {
 	CheckinPreview   *tview.TextView
 	CheckinConfirm1  *CustomModal
 	CheckinConfirm2  *tview.Flex
+	CheckinSummary   *tview.TextView
+	CheckinCounter   *tview.TextView
+	checkinConfirm2Form *tview.Form
+	checkinFiles     []string // local paths shown in the checkin page, for the result screen
 	ConflictsList  *tview.List
 	ConflictPage   *tview.Flex
 	Flex           *tview.Flex
@@ -56,6 +60,12 @@ type Layout struct {
 	BottomPages    *tview.Pages
 	BottomBar      *tview.TextView
 	SearchInput    *tview.InputField
+	CommandInput   *tview.InputField // ":" command mode
+	EditorList     *tview.List       // "e" editor picker
+	EditorPage     *tview.Flex
+	lastEditor     string // editor picked last time, preselected next time
+	diffFile       string // local file shown in DiffView, for "e" to edit it
+	editorReturnFocus tview.Primitive // where focus goes after the editor picker closes
 
 	panels             []tview.Primitive
 	currentPanel       int
@@ -141,18 +151,7 @@ func NewLayout(app *App) *Layout {
 
 	l.SearchInput.SetDoneFunc(func(key tcell.Key) {
 		if l.currentPanel == 3 {
-			l.searchQueryHistory = strings.ToLower(l.SearchInput.GetText())
-			l.setLoadingState(l.HistoryList)
-			go func() {
-				outHistory, errHistory := l.App.tfsClient.GetHistory(l.searchQueryHistory, 0)
-				l.mu.Lock()
-				l.historyData = parseOutput(outHistory, errHistory)
-				l.historyHasMore = changesetCount(l.historyData) == tfs.HistoryPageSize
-				l.mu.Unlock()
-				l.App.tviewApp.QueueUpdateDraw(func() {
-					l.renderHistoryPanel()
-				})
-			}()
+			l.searchHistory(l.SearchInput.GetText())
 		}
 
 		l.BottomPages.SwitchToPage("bar")
@@ -161,6 +160,7 @@ func NewLayout(app *App) *Layout {
 
 	l.BottomPages.AddPage("bar", l.BottomBar, true, true)
 	l.BottomPages.AddPage("search", l.SearchInput, true, false)
+	l.setupCommandMode()
 
 	// Layout construction
 	leftColumn := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -207,11 +207,17 @@ Panel Specific:
 [ Space ] Stage/Unstage file or whole folder
 [ Left/Right ] Collapse/Expand folder
 [ i ] Ignore file/folder in Unstaged
+[ e ] Open file in an editor (pick from installed ones)
 [ I ] Manage ignored paths
 [ / ] Search files
 [ Enter ] View diff / Toggle folder / Changeset files & diff
 [ o ] Open changeset in browser
-[ Ctrl+S ] Submit checkin message`
+[ Ctrl+S ] Submit checkin message
+
+[ : ] Command mode (:q :get :checkin :changeset <id> ...)
+
+Vim keys: [ h/j/k/l ] move  [ G ] bottom
+[ Ctrl+D/U ] page  [ q ] close overlay`
 
 	l.HelpModal = NewCustomModal(helpText, []string{"Close"}, func(buttonIndex int, buttonLabel string) {
 		l.Pages.HidePage("help")
@@ -239,6 +245,7 @@ Panel Specific:
 
 	l.setupGetLatestUI()
 	l.setupChangesetUI()
+	l.setupEditorPicker()
 	l.setupConflictsUI()
 	l.setupCheckinUI()
 
@@ -254,6 +261,7 @@ Panel Specific:
 	l.Pages.AddPage("checkin_confirm2", l.CheckinConfirm2, true, false)
 	l.Pages.AddPage("ignore_page", l.IgnorePage, true, false)
 	l.Pages.AddPage("changeset_page", l.ChangesetPage, true, false)
+	l.Pages.AddPage("editor_page", l.EditorPage, true, false)
 
 	l.setupKeybindings()
 	return l
@@ -584,9 +592,45 @@ func (l *Layout) setupConflictsUI() {
 }
 
 func (l *Layout) setupKeybindings() {
+	// Vim-style keys for every panel, tree, list, diff and modal: they are translated
+	// into the arrow/page keys those widgets already handle.
+	l.App.tviewApp.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch l.App.tviewApp.GetFocus().(type) {
+		case *tview.InputField, *tview.TextArea:
+			return event // typing text, keep letters as they are
+		}
+
+		switch event.Key() {
+		case tcell.KeyCtrlD:
+			return tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone)
+		case tcell.KeyCtrlU:
+			return tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone)
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'j':
+				return tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone)
+			case 'k':
+				return tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone)
+			case 'h':
+				return tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModNone)
+			case 'l':
+				return tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone)
+			case 'G':
+				return tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone)
+			case 'q':
+				// On overlay pages (changeset, ignore list, conflicts, ...) q goes back like Esc.
+				// On the main screen it still quits.
+				if name, _ := l.Pages.GetFrontPage(); name != "main" && name != "splash" {
+					return tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone)
+				}
+			}
+		}
+		return event
+	})
+
 	// Global Keybindings
 	l.Flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if l.App.tviewApp.GetFocus() == l.SearchInput {
+		if focus := l.App.tviewApp.GetFocus(); focus == l.SearchInput || focus == l.CommandInput {
 			return event
 		}
 
@@ -595,22 +639,14 @@ func (l *Layout) setupKeybindings() {
 			case 'q':
 				l.App.tviewApp.Stop()
 				return nil
+			case ':':
+				l.openCommandMode()
+				return nil
 			case '?':
-				l.Pages.ShowPage("help")
-				l.App.tviewApp.SetFocus(l.HelpModal)
+				l.showHelp()
 				return nil
 			case 'g':
-				// Rebuild the tree on every open so new/removed folders show up and checks reset
-				l.getLatestChecked = make(map[string]bool)
-				rootItem := &getLatestItem{path: ".", isDir: true, loaded: true}
-				root := tview.NewTreeNode(getLatestLabel(rootItem, false, true)).
-					SetReference(rootItem).
-					SetColor(tcell.ColorRed)
-				addTreeChildren(root, ".")
-				l.DirTree.SetRoot(root).SetCurrentNode(root)
-				l.DirTree.SetTitle(" Get Latest - pick files/folders ")
-				l.Pages.ShowPage("getlatest_tree")
-				l.App.tviewApp.SetFocus(l.DirTree)
+				l.openGetLatest()
 				return nil
 			case 'c':
 				l.checkAndShowConflicts(".")
@@ -619,9 +655,7 @@ func (l *Layout) setupKeybindings() {
 				l.showCheckinFlow()
 				return nil
 			case 'I':
-				l.refreshIgnoreList()
-				l.Pages.ShowPage("ignore_page")
-				l.App.tviewApp.SetFocus(l.IgnoreList)
+				l.showIgnoreList()
 				return nil
 			case '1':
 				l.setFocus(0)
@@ -719,7 +753,19 @@ func (l *Layout) setupKeybindings() {
 	})
 
 	l.DiffView.SetFocusFunc(func() {
-		l.BottomBar.SetText(" [↑/↓ j/k] scroll | [pgup/pgdn] page | [home/end] top/bottom | [←/→] scroll sideways | [n/p] next/prev change | [1-6] jump ")
+		l.BottomBar.SetText(" [↑/↓ j/k] scroll | [pgup/pgdn] page | [home/end] top/bottom | [←/→] scroll sideways | [n/p] next/prev change | [w] whitespace on/off | [e] edit at this line | [1-6] jump ")
+	})
+	l.DiffView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyRune && event.Rune() == 'e' && l.diffFile != "" {
+			l.showEditorPicker(l.diffFile, l.DiffView.CurrentLine())
+			return nil
+		}
+		if event.Key() == tcell.KeyRune && event.Rune() == 'w' && l.diffFile != "" {
+			l.DiffView.IgnoreSpace = !l.DiffView.IgnoreSpace
+			l.showFileDiff(l.diffFile)
+			return nil
+		}
+		return event
 	})
 
 	l.CommandLog.SetFocusFunc(func() {
@@ -754,6 +800,47 @@ func (l *Layout) RefreshAll() {
 	l.setLoadingState(l.HistoryList)
 
 	go l.fetchData(l.searchQueryHistory)
+}
+
+// searchHistory reloads the Changesets panel filtered by author ("" for everyone).
+func (l *Layout) searchHistory(author string) {
+	l.searchQueryHistory = strings.ToLower(author)
+	l.setLoadingState(l.HistoryList)
+	go func() {
+		outHistory, errHistory := l.App.tfsClient.GetHistory(l.searchQueryHistory, 0)
+		l.mu.Lock()
+		l.historyData = parseOutput(outHistory, errHistory)
+		l.historyHasMore = changesetCount(l.historyData) == tfs.HistoryPageSize
+		l.mu.Unlock()
+		l.App.tviewApp.QueueUpdateDraw(func() {
+			l.renderHistoryPanel()
+		})
+	}()
+}
+
+func (l *Layout) showHelp() {
+	l.Pages.ShowPage("help")
+	l.App.tviewApp.SetFocus(l.HelpModal)
+}
+
+func (l *Layout) showIgnoreList() {
+	l.refreshIgnoreList()
+	l.Pages.ShowPage("ignore_page")
+	l.App.tviewApp.SetFocus(l.IgnoreList)
+}
+
+func (l *Layout) openGetLatest() {
+	// Rebuild the tree on every open so new/removed folders show up and checks reset
+	l.getLatestChecked = make(map[string]bool)
+	rootItem := &getLatestItem{path: ".", isDir: true, loaded: true}
+	root := tview.NewTreeNode(getLatestLabel(rootItem, false, true)).
+		SetReference(rootItem).
+		SetColor(tcell.ColorRed)
+	addTreeChildren(root, ".")
+	l.DirTree.SetRoot(root).SetCurrentNode(root)
+	l.DirTree.SetTitle(" Get Latest - pick files/folders ")
+	l.Pages.ShowPage("getlatest_tree")
+	l.App.tviewApp.SetFocus(l.DirTree)
 }
 
 // setMainText shows text in the Main View, switching back from the diff view if needed.
@@ -1010,217 +1097,6 @@ func changesetCount(lines []string) int {
 		}
 	}
 	return count
-}
-
-func colorizeDiff(diff string) string {
-	lines := strings.Split(tview.Escape(diff), "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			lines[i] = "[green]" + line + "[-]"
-		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
-			lines[i] = "[red]" + line + "[-]"
-		} else if strings.HasPrefix(line, "@@") {
-			lines[i] = "[cyan]" + line + "[-]"
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (l *Layout) setupCheckinUI() {
-	// 1. Input Modal
-	l.CheckinInput = tview.NewTextArea().
-		SetLabel("Checkin Message: ").
-		SetPlaceholder("Enter = new line")
-
-	l.CheckinPreview = tview.NewTextView().
-		SetDynamicColors(true).
-		SetWrap(true).
-		SetWordWrap(true)
-	l.CheckinPreview.SetTitle(" Files to Checkin ").
-		SetBorder(true)
-
-	innerModal := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(l.CheckinPreview, 0, 1, false).
-		AddItem(tview.NewBox(), 1, 0, false). // Spacer
-		AddItem(l.CheckinInput, 5, 0, true).
-		AddItem(tview.NewTextView().SetText(" [ctrl+s] submit | [esc] cancel "), 1, 0, false)
-	innerModal.SetBorder(true).SetTitle(" Checkin ")
-
-	l.CheckinPage = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).
-			AddItem(nil, 0, 1, false).
-			AddItem(innerModal, 80, 1, true).
-			AddItem(nil, 0, 1, false), 24, 1, true).
-		AddItem(nil, 0, 1, false)
-
-	// Enter inserts a new line (default TextArea behavior), Ctrl+S submits
-	l.CheckinInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyCtrlS {
-			if strings.TrimSpace(l.CheckinInput.GetText()) == "" {
-				return nil
-			}
-			l.Pages.ShowPage("checkin_confirm1")
-			l.App.tviewApp.SetFocus(l.CheckinConfirm1)
-			return nil
-		} else if event.Key() == tcell.KeyEsc {
-			l.Pages.HidePage("checkin_page")
-			l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
-			return nil
-		}
-		return event
-	})
-
-	// 2. Confirm 1
-	l.CheckinConfirm1 = NewCustomModal("Are you sure to checkin this data?", []string{"Yes", "No"}, func(buttonIndex int, buttonLabel string) {
-			if buttonLabel == "Yes" {
-				l.Pages.HidePage("checkin_confirm1")
-				l.Pages.ShowPage("checkin_confirm2")
-				l.App.tviewApp.SetFocus(l.CheckinConfirm2)
-			} else {
-				l.Pages.HidePage("checkin_confirm1")
-				l.App.tviewApp.SetFocus(l.CheckinInput)
-			}
-		})
-
-	// 3. Confirm 2 with custom colored buttons
-	form := tview.NewForm().
-		AddButton("Yes", func() {
-			l.Pages.HidePage("checkin_confirm2")
-			l.Pages.HidePage("checkin_page")
-			
-			var filesToCkin []string
-			l.mu.Lock()
-			for f, staged := range l.stagedFiles {
-				if staged {
-					if strings.HasSuffix(strings.TrimSpace(f), ":") {
-						continue
-					}
-					extractedPath := extractFilePath(f)
-					if extractedPath != "" {
-						filesToCkin = append(filesToCkin, extractedPath)
-					}
-				}
-			}
-			l.mu.Unlock()
-
-			msg := l.CheckinInput.GetText()
-
-			// Without file args, tf checkin would check in ALL pending changes
-			if len(filesToCkin) == 0 {
-				l.MainView.SetTitle(" Checkin Error ")
-				l.setMainText("No valid file paths found in staged files. Checkin cancelled.")
-				l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
-				return
-			}
-
-			l.LoadingModal.SetText("Checking in files...")
-			l.Pages.ShowPage("loading")
-			l.App.tviewApp.SetFocus(l.LoadingModal)
-
-			go func() {
-				out, err := l.App.tfsClient.Checkin(filesToCkin, msg)
-				l.App.tviewApp.QueueUpdateDraw(func() {
-					l.Pages.HidePage("loading")
-					l.CheckinInput.SetText("", false) // Clear input after checkin attempt
-
-					if err != nil {
-						l.MainView.SetTitle(" Checkin Error ")
-						l.setMainText(err.Error() + "\n" + out)
-					} else {
-						l.MainView.SetTitle(" Checkin Success ")
-						l.setMainText(out)
-						
-						// Clear staged files on success
-						l.mu.Lock()
-						for k := range l.stagedFiles {
-							delete(l.stagedFiles, k)
-						}
-						l.mu.Unlock()
-						l.RefreshAll()
-					}
-					l.App.tviewApp.SetFocus(l.panels[l.currentPanel])
-				})
-			}()
-		}).
-		AddButton("No", func() {
-			l.Pages.HidePage("checkin_confirm2")
-			l.App.tviewApp.SetFocus(l.CheckinInput)
-		})
-	
-	form.SetButtonsAlign(tview.AlignCenter)
-
-	for i := 0; i < form.GetButtonCount(); i++ {
-		btn := form.GetButton(i)
-		originalLabel := btn.GetLabel()
-		btn.SetFocusFunc(func() {
-			btn.SetLabel("> " + originalLabel + " <")
-		})
-		btn.SetBlurFunc(func() {
-			btn.SetLabel(originalLabel)
-		})
-	}
-
-	// Color the buttons
-	buttonYes := form.GetButton(0)
-	buttonYes.SetBackgroundColor(tcell.ColorGreen)
-	buttonYes.SetLabelColor(tcell.ColorWhite)
-	
-	buttonNo := form.GetButton(1)
-	buttonNo.SetBackgroundColor(tcell.ColorRed)
-	buttonNo.SetLabelColor(tcell.ColorWhite)
-
-	textView := tview.NewTextView().
-		SetTextAlign(tview.AlignCenter).
-		SetText("\nAre you really sure to checkin this data?\n")
-
-	innerFlex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(textView, 4, 1, false).
-		AddItem(form, 3, 1, true)
-	innerFlex.SetBorder(true).SetTitle(" Final Confirmation ")
-
-	l.CheckinConfirm2 = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).
-			AddItem(nil, 0, 1, false).
-			AddItem(innerFlex, 50, 1, true).
-			AddItem(nil, 0, 1, false), 9, 1, true).
-		AddItem(nil, 0, 1, false)
-
-	// Ensure escape goes back, and allow left/right navigation
-	form.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEsc {
-			l.Pages.HidePage("checkin_confirm2")
-			l.App.tviewApp.SetFocus(l.CheckinInput)
-			return nil
-		} else if event.Key() == tcell.KeyLeft {
-			return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
-		} else if event.Key() == tcell.KeyRight {
-			return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
-		}
-		return event
-	})
-}
-
-func (l *Layout) showCheckinFlow() {
-	l.mu.Lock()
-	var staged []string
-	for file, isStaged := range l.stagedFiles {
-		if isStaged {
-			staged = append(staged, file)
-		}
-	}
-	l.mu.Unlock()
-
-	if len(staged) == 0 {
-		l.MainView.SetTitle(" Error ")
-		l.setMainText("No files staged for checkin.")
-		return
-	}
-
-	l.CheckinPreview.SetText(strings.Join(staged, "\n"))
-	l.Pages.ShowPage("checkin_page")
-	l.App.tviewApp.SetFocus(l.CheckinInput)
 }
 
 // changesetIDFromText returns the changeset ID from a history row, or "" for

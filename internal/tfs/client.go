@@ -64,9 +64,14 @@ func (c *Client) GetChangesetDetail(changesetID string) (string, error) {
 
 // GetChangesetFileDiff returns the unified diff of one server item between
 // the changeset before changesetID and changesetID itself.
-func (c *Client) GetChangesetFileDiff(serverPath string, changesetID int) (string, error) {
+// ignoreSpace hides changes that are only whitespace (e.g. indentation).
+func (c *Client) GetChangesetFileDiff(serverPath string, changesetID int, ignoreSpace bool) (string, error) {
 	versionSpec := "C" + strconv.Itoa(changesetID-1) + "~C" + strconv.Itoa(changesetID)
-	return c.execute("diff", serverPath, "/version:"+versionSpec, "/format:Unified")
+	args := []string{"diff", serverPath, "/version:" + versionSpec, "/format:Unified"}
+	if ignoreSpace {
+		args = append(args, "/ignorespace")
+	}
+	return c.execute(args...)
 }
 
 // ViewFile returns the content of a server item at a specific changeset.
@@ -80,8 +85,13 @@ func (c *Client) GetShelvesets() (string, error) {
 }
 
 // GetDiff returns the unified diff for a specific file.
-func (c *Client) GetDiff(filename string) (string, error) {
-	return c.execute("diff", filename, "/format:Unified")
+// ignoreSpace hides changes that are only whitespace (e.g. indentation).
+func (c *Client) GetDiff(filename string, ignoreSpace bool) (string, error) {
+	args := []string{"diff", filename, "/format:Unified"}
+	if ignoreSpace {
+		args = append(args, "/ignorespace")
+	}
+	return c.execute(args...)
 }
 
 // GetWorkspace returns the current workspace info.

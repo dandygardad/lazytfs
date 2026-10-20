@@ -31,7 +31,7 @@ func (l *Layout) setupChangesetUI() {
 
 	l.ChangesetDiff = NewDiffView()
 
-	hint := tview.NewTextView().SetText(" [↑/↓] pick file | [enter/tab] switch files/diff | [n/p] next/prev change | [←/→] scroll sideways | [o] open in browser | [esc] back ")
+	hint := tview.NewTextView().SetText(" [↑/↓] pick file | [enter/tab] switch files/diff | [n/p] next/prev change | [w] whitespace on/off | [←/→] scroll sideways | [o] open in browser | [esc] back ")
 
 	body := tview.NewFlex().
 		AddItem(l.ChangesetFiles, 0, 3, true).
@@ -72,6 +72,12 @@ func (l *Layout) setupChangesetUI() {
 	})
 	l.ChangesetDiff.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch {
+		case event.Key() == tcell.KeyRune && event.Rune() == 'w':
+			// Toggle whitespace changes and reload, cached diffs used the old setting
+			l.ChangesetDiff.IgnoreSpace = !l.ChangesetDiff.IgnoreSpace
+			l.changesetDiffCache = make(map[int]changesetDiff)
+			l.loadChangesetDiff(l.ChangesetFiles.GetCurrentItem())
+			return nil
 		case event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyTab:
 			l.App.tviewApp.SetFocus(l.ChangesetFiles)
 			return nil
@@ -140,18 +146,8 @@ func (l *Layout) showChangeset(changesetID string) {
 			l.changesetItems = items
 			l.ChangesetFiles.SetTitle(" Files (" + strconv.Itoa(len(items)) + ") ")
 			for _, item := range items {
-				change := strings.ToLower(item.change)
-				letter := "[yellow]M[-]"
-				switch {
-				case strings.Contains(change, "undelete") || strings.Contains(change, "add") || strings.Contains(change, "branch"):
-					letter = "[green]A[-]"
-				case strings.Contains(change, "delete"):
-					letter = "[red]D[-]"
-				case strings.Contains(change, "rename"):
-					letter = "[blue]R[-]"
-				}
 				dir, name := path.Split(item.serverPath)
-				l.ChangesetFiles.AddItem(letter+" "+tview.Escape(name)+"  [gray]"+tview.Escape(strings.TrimSuffix(dir, "/"))+"[-]", "", 0, nil)
+				l.ChangesetFiles.AddItem(changeBadge(item.change)+" "+tview.Escape(name)+"  [gray]"+tview.Escape(strings.TrimSuffix(dir, "/"))+"[-]", "", 0, nil)
 			}
 			if len(items) > 0 {
 				l.ChangesetFiles.SetCurrentItem(0)
@@ -176,6 +172,7 @@ func (l *Layout) loadChangesetDiff(i int) {
 	l.ChangesetDiff.SetDiff(name, textRows("Loading diff..."), 0, 0)
 	seq := l.changesetSeq.Add(1)
 	id := l.changesetID
+	ignoreSpace := l.ChangesetDiff.IgnoreSpace
 	go func() {
 		// Wait a bit so moving quickly through the list doesn't start a tf call per file
 		time.Sleep(250 * time.Millisecond)
@@ -203,7 +200,7 @@ func (l *Layout) loadChangesetDiff(i int) {
 				c.rows, c.removed = wholeFileRows("Deleted in this changeset", out, false)
 			}
 		default:
-			out, err := l.App.tfsClient.GetChangesetFileDiff(item.serverPath, id)
+			out, err := l.App.tfsClient.GetChangesetFileDiff(item.serverPath, id, ignoreSpace)
 			if err != nil {
 				c.rows = textRows("Error getting diff:\n" + err.Error() + "\n" + out)
 			} else if c.rows, c.added, c.removed = parseUnifiedDiff(out); len(c.rows) == 0 {

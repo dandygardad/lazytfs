@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -9,6 +11,12 @@ type CustomModal struct {
 	*tview.Flex
 	textView *tview.TextView
 	form     *tview.Form
+	box      *tview.Flex // centered row holding the bordered modal, resized to fit the text
+}
+
+// modalHeight fits the text: lines + blank padding + border + buttons, at least 15 rows.
+func modalHeight(text string) int {
+	return max(strings.Count(text, "\n")+8, 15)
 }
 
 func NewCustomModal(text string, buttons []string, doneFunc func(buttonIndex int, buttonLabel string)) *CustomModal {
@@ -50,12 +58,14 @@ func NewCustomModal(text string, buttons []string, doneFunc func(buttonIndex int
 	
 	innerFlex.SetBorder(true)
 
+	m.box = tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(nil, 0, 1, false).
+		AddItem(innerFlex, 60, 1, true).
+		AddItem(nil, 0, 1, false)
+
 	m.Flex = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(nil, 0, 1, false).
-		AddItem(tview.NewFlex().SetDirection(tview.FlexColumn).
-			AddItem(nil, 0, 1, false).
-			AddItem(innerFlex, 60, 1, true).
-			AddItem(nil, 0, 1, false), 15, 1, true).
+		AddItem(m.box, modalHeight(text), 1, true).
 		AddItem(nil, 0, 1, false)
 
 	if len(buttons) > 0 {
@@ -74,6 +84,7 @@ func NewCustomModal(text string, buttons []string, doneFunc func(buttonIndex int
 
 func (m *CustomModal) SetText(text string) *CustomModal {
 	m.textView.SetText("\n" + text + "\n")
+	m.Flex.ResizeItem(m.box, modalHeight(text), 1)
 	return m
 }
 

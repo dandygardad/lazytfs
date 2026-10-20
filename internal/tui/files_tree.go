@@ -57,9 +57,9 @@ func (l *Layout) setupFileTrees() {
 			l.currentPanel = panelIndex
 			l.MainView.SetTitle(" Main View ")
 			if isStagedTree {
-				l.BottomBar.SetText(" [q] quit | [?] help | [C] checkin | [enter] diff/expand | [space] unstage | [←/→] collapse/expand | [/] search | [1-6] jump | [r] refresh ")
+				l.BottomBar.SetText(" [q] quit | [?] help | [C] checkin | [enter] diff/expand | [e] edit | [space] unstage | [←/→] collapse/expand | [/] search | [1-6] jump | [r] refresh ")
 			} else {
-				l.BottomBar.SetText(" [q] quit | [?] help | [C] checkin | [enter] diff/expand | [space] stage | [←/→] collapse/expand | [i] ignore | [I] ignored list | [/] search | [1-6] jump | [r] refresh ")
+				l.BottomBar.SetText(" [q] quit | [?] help | [C] checkin | [enter] diff/expand | [e] edit | [space] stage | [←/→] collapse/expand | [i] ignore | [I] ignored list | [/] search | [1-6] jump | [r] refresh ")
 			}
 		})
 
@@ -82,22 +82,7 @@ func (l *Layout) setupFileTrees() {
 				setExpanded(node, fn, !node.IsExpanded())
 				return
 			}
-			filename := extractFilePath(fn.raw)
-			l.setMainText("Loading diff for " + filename + "...")
-			go func() {
-				diffOut, err := l.App.tfsClient.GetDiff(filename)
-				l.App.tviewApp.QueueUpdateDraw(func() {
-					if err != nil {
-						l.setMainText("Error getting diff:\n" + err.Error() + "\n\nOutput:\n" + tview.Escape(diffOut))
-					} else if rows, added, removed := parseUnifiedDiff(diffOut); len(rows) > 0 {
-						l.DiffView.SetDiff(filepath.Base(filename), rows, added, removed)
-						l.MainPages.SwitchToPage("diff")
-					} else {
-						// No hunks to show side by side (e.g. binary file), show tf output as is
-						l.setMainText(colorizeDiff(diffOut))
-					}
-				})
-			}()
+			l.showFileDiff(extractFilePath(fn.raw))
 		})
 
 		tree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -170,6 +155,12 @@ func (l *Layout) setupFileTrees() {
 					l.BottomPages.SwitchToPage("search")
 					l.App.tviewApp.SetFocus(l.SearchInput)
 					return nil
+				case 'e':
+					if fn == nil || len(fn.children) > 0 {
+						return nil
+					}
+					l.showEditorPicker(extractFilePath(fn.raw), 0)
+					return nil
 				case 'i':
 					if isStagedTree || fn == nil {
 						return nil
@@ -227,6 +218,43 @@ func (l *Layout) setupFileTrees() {
 			AddItem(inner, 80, 1, true).
 			AddItem(nil, 0, 1, false), 20, 1, true).
 		AddItem(nil, 0, 1, false)
+}
+
+// showFileDiff shows the side-by-side diff of a local file against the server version.
+func (l *Layout) showFileDiff(filename string) {
+	l.setMainText("Loading diff for " + filename + "...")
+	ignoreSpace := l.DiffView.IgnoreSpace
+	go func() {
+		diffOut, err := l.App.tfsClient.GetDiff(filename, ignoreSpace)
+		l.App.tviewApp.QueueUpdateDraw(func() {
+			if err != nil {
+				l.setMainText("Error getting diff:\n" + err.Error() + "\n\nOutput:\n" + tview.Escape(diffOut))
+				return
+			}
+			rows, added, removed := parseUnifiedDiff(diffOut)
+			// With whitespace ignored, tf prints context lines with the old (server) text,
+			// so take the right side from the local file to show its real indentation.
+			if data, err := os.ReadFile(filename); err == nil && ignoreSpace {
+				lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+				for i := range rows {
+					if rows[i].kind == 'c' && rows[i].newNo > 0 && rows[i].newNo <= len(lines) {
+						rows[i].newText = strings.ReplaceAll(lines[rows[i].newNo-1], "\t", "    ")
+					}
+				}
+			}
+			if len(rows) == 0 {
+				// No hunks (e.g. binary file, or only whitespace changes while ignoring them)
+				msg := diffOut
+				if ignoreSpace {
+					msg += "\n\nNo changes besides whitespace? Press [w] to include whitespace changes."
+				}
+				rows = textRows(msg)
+			}
+			l.DiffView.SetDiff(filepath.Base(filename), rows, added, removed)
+			l.diffFile = filename
+			l.MainPages.SwitchToPage("diff")
+		})
+	}()
 }
 
 func (l *Layout) refreshIgnoreList() {

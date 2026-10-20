@@ -5,7 +5,7 @@ A terminal UI for Team Foundation Server (TFS) version control inspired by `lazy
 
 ## Features
 - **4-Panel Layout:** View Workspace Status, Unstaged Files, Staged Files, and Changesets (History).
-- **Side-by-Side Diff:** Press `[Enter]` on a file to see server (left) vs local (right) with line numbers and highlighted removed/added lines. Press `[5]` to focus it, then scroll with `[↑/↓]`/`[PgUp/PgDn]`, scroll sideways with `[←/→]`, and jump between changes with `[n/p]`. Mouse wheel works too.
+- **Side-by-Side Diff:** Press `[Enter]` on a file to see server (left) vs local (right) with line numbers and highlighted removed/added lines. Press `[5]` to focus it, then scroll with `[↑/↓]`/`[PgUp/PgDn]`, scroll sideways with `[←/→]`, and jump between changes with `[n/p]`. Whitespace-only changes (e.g. indentation) are ignored by default like Visual Studio; press `[w]` to toggle. Mouse wheel works too.
 - **Tree View Staging:** Unstaged and Staged files are shown as a folder tree (single-folder chains are compacted, e.g. `src\app\models`). Stage a single file or a whole folder with `[Space]`, collapse/expand folders with `[←/→]`.
 - **Clean Status UI**: File statuses are colored and formatted (e.g., `File.cs (Edit)`, `File.cs (New)`).
 - **Ignore Paths (`i` / `I`):** Hide files or folders you never check in (e.g. `bin`, `obj`) from Unstaged. The list is saved in `%AppData%\lazytfs\ignore.txt` and can be managed with `[I]`.
@@ -16,6 +16,8 @@ A terminal UI for Team Foundation Server (TFS) version control inspired by `lazy
 - **Server-Side History Search (`/`):** Filter changesets by fetching directly from the TFS server based on author or keywords.
 - **Command Log:** Real-time visibility into the underlying `tf` commands being executed in the background.
 - **Fast Navigation:** Jump between panels instantly using hotkeys `[1-6]`.
+- **Vim-Style Keys:** `h/j/k/l` move everywhere (panels, trees, lists, diffs, modals), `G` jumps to the bottom, `Ctrl+D/Ctrl+U` page down/up, and `q` closes overlay pages.
+- **Edit in Your Editor (`e`):** Pick from the editors installed on your machine (`$EDITOR`, Neovim, Vim, Helix, Micro, Nano, VS Code, Cursor, Sublime Text, Notepad++, Notepad). Terminal editors take over the terminal and lazytfs resumes when they exit; GUI editors open in their own window. The last pick is preselected.
 
 ## Prerequisites
 - **TFS CLI (`tf.exe`)**: Ensure `tf.exe` is installed and available in your system's `PATH` (typically comes with Visual Studio).
@@ -48,15 +50,42 @@ lazytfs
 - `[5]` - Jump to Main View (useful for scrolling long diffs)
 - `[6]` - Jump to Command Log
 - `[I]` - Manage ignored paths
+- `[:]` - Command mode (see below)
 
 **Panel Specific (Files / History):**
 - `[Space]` - Stage/Unstage file (or every file under a folder)
 - `[←/→]` - Collapse/Expand folder (`←` on a file jumps to its folder)
 - `[i]` - Ignore file/folder in Unstaged
+- `[e]` - Open file in an editor (pick from the ones installed)
 - `[/]` - Search files or authors
 - `[Enter]` - View diff / Toggle folder / Open changeset files & diff
 - `[o]` - Open selected changeset in browser (Changesets panel)
 - `[Ctrl+S]` - Submit checkin message (Enter adds a new line)
+
+**Vim-Style Navigation (works everywhere except text inputs):**
+- `[j/k]` - Down/Up
+- `[h/l]` - Left/Right (collapse/expand in trees, scroll sideways in diffs, move between modal buttons)
+- `[G]` - Go to bottom (`[Home]` for top, since `[g]` is Get Latest)
+- `[Ctrl+D/Ctrl+U]` - Page down/up
+- `[q]` - Close overlay page (changeset, ignored paths, conflicts); quits on the main screen
+
+**Command Mode (`:`):** type a command and press `Enter` (with autocomplete):
+- `:q` / `:quit` - Quit
+- `:r` / `:refresh` - Reload status, files and history
+- `:g` / `:get` - Get Latest
+- `:ci` / `:checkin` - Checkin staged files
+- `:c` / `:conflicts` - Check and resolve conflicts
+- `:ig` / `:ignored` - Manage ignored paths
+- `:cs <id>` / `:changeset <id>` - Open a changeset with its files and diffs
+- `:au <name>` / `:author <name>` - Show changesets by author (empty = everyone)
+- `:h` / `:help` - Show keybindings
+- `:1` - `:4` - Jump to a left panel
+
+Setting `EDITOR` (e.g. `setx EDITOR nvim`) puts that editor at the top of the `[e]` picker.
+
+## License
+
+[MIT](LICENSE) © Dandy Garda
 
 ---
 *Built by [dg](https://dandygarda.com)*

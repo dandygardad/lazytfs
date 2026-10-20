@@ -34,10 +34,14 @@ type DiffView struct {
 	offset  int // first visible row
 	hOffset int // horizontal scroll in characters
 	maxNo   int // biggest line number, for the line number column width
+
+	// IgnoreSpace hides changes that are only whitespace, like Visual Studio's
+	// "Ignore white space". Toggled with "w" and shown in the title.
+	IgnoreSpace bool
 }
 
 func NewDiffView() *DiffView {
-	d := &DiffView{Box: tview.NewBox()}
+	d := &DiffView{Box: tview.NewBox(), IgnoreSpace: true}
 	d.SetBorder(true).SetTitleColor(tcell.ColorWhite)
 	return d
 }
@@ -54,7 +58,22 @@ func (d *DiffView) SetDiff(filename string, rows []diffRow, added, removed int) 
 		d.SetTitle(" Diff ")
 		return
 	}
-	d.SetTitle(" Diff: " + filename + "  +" + strconv.Itoa(added) + " -" + strconv.Itoa(removed) + " ")
+	mode := "  · whitespace shown "
+	if d.IgnoreSpace {
+		mode = "  · whitespace ignored "
+	}
+	d.SetTitle(" Diff: " + filename + "  +" + strconv.Itoa(added) + " -" + strconv.Itoa(removed) + mode)
+}
+
+// CurrentLine returns the local (right side) line number at the top of the view,
+// so an editor can open where the user is looking. 0 when there is none.
+func (d *DiffView) CurrentLine() int {
+	for i := d.offset; i < len(d.rows); i++ {
+		if d.rows[i].newNo > 0 {
+			return d.rows[i].newNo
+		}
+	}
+	return 0
 }
 
 // parseUnifiedDiff turns `tf diff /format:Unified` output into side-by-side rows.
