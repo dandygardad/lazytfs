@@ -3,6 +3,7 @@ package tfs
 import (
 	"bytes"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -29,9 +30,10 @@ func (c *Client) execute(args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), err
 }
 
-// GetStatus returns the output of `tf status`.
+// GetStatus returns the output of `tf status` for the current folder only,
+// so pending changes from other mappings in the same workspace don't show up.
 func (c *Client) GetStatus() (string, error) {
-	return c.execute("status")
+	return c.execute("status", ".", "/recursive")
 }
 
 // GetBranches returns the output of `tf branches .`.
@@ -39,11 +41,18 @@ func (c *Client) GetBranches() (string, error) {
 	return c.execute("branches", ".")
 }
 
-// GetHistory returns the output of `tf history`.
-func (c *Client) GetHistory(author string) (string, error) {
-	args := []string{"history", ".", "/r", "/noprompt", "/stopafter:50"}
+// HistoryPageSize is how many changesets GetHistory returns per call.
+const HistoryPageSize = 50
+
+// GetHistory returns the output of `tf history`, one page of HistoryPageSize changesets.
+// beforeID > 0 returns the page of changesets older than beforeID (for "load more").
+func (c *Client) GetHistory(author string, beforeID int) (string, error) {
+	args := []string{"history", ".", "/r", "/noprompt", "/stopafter:" + strconv.Itoa(HistoryPageSize)}
 	if author != "" {
 		args = append(args, "/user:"+author)
+	}
+	if beforeID > 0 {
+		args = append(args, "/version:~C"+strconv.Itoa(beforeID-1))
 	}
 	return c.execute(args...)
 }
@@ -53,11 +62,16 @@ func (c *Client) GetChangesetDetail(changesetID string) (string, error) {
 	return c.execute("changeset", changesetID, "/noprompt")
 }
 
-// GetChangesetDiff returns the diff of a specific changeset.
-func (c *Client) GetChangesetDiff(changesetID string) (string, error) {
-	// Compare the changeset with its immediate predecessor
-	versionSpec := "C" + changesetID + "~C" + changesetID
-	return c.execute("diff", "$/", "/version:"+versionSpec, "/recursive", "/format:Unified")
+// GetChangesetFileDiff returns the unified diff of one server item between
+// the changeset before changesetID and changesetID itself.
+func (c *Client) GetChangesetFileDiff(serverPath string, changesetID int) (string, error) {
+	versionSpec := "C" + strconv.Itoa(changesetID-1) + "~C" + strconv.Itoa(changesetID)
+	return c.execute("diff", serverPath, "/version:"+versionSpec, "/format:Unified")
+}
+
+// ViewFile returns the content of a server item at a specific changeset.
+func (c *Client) ViewFile(serverPath string, changesetID int) (string, error) {
+	return c.execute("view", serverPath, "/version:C"+strconv.Itoa(changesetID), "/console")
 }
 
 // GetShelvesets returns the output of `tf shelvesets`.
@@ -75,10 +89,13 @@ func (c *Client) GetWorkspace() (string, error) {
 	return c.execute("workfold")
 }
 
-// GetLatest returns the output of `tf get` for a specific path.
-func (c *Client) GetLatest(path string) (string, error) {
+// GetLatest returns the output of `tf get` for the given files/folders.
+func (c *Client) GetLatest(paths []string) (string, error) {
+	args := []string{"get"}
+	args = append(args, paths...)
 	// Use /noprompt so it doesn't block waiting for input in case of conflicts
-	return c.execute("get", path, "/recursive", "/noprompt")
+	args = append(args, "/recursive", "/noprompt")
+	return c.execute(args...)
 }
 
 // ResolveConflicts resolves conflicts for a specific path by taking the server's version or keeping yours.
@@ -87,14 +104,14 @@ func (c *Client) ResolveConflicts(path string, takeServer bool) (string, error) 
 	if takeServer {
 		resolution = "/auto:TakeTheirs"
 	}
-	return c.execute("resolve", path, "/recursive", resolution)
+	return c.execute("resolve", path, "/recursive", resolution, "/noprompt")
 }
 
 // Checkin executes a checkin for the specified files with the given comment.
 func (c *Client) Checkin(files []string, comment string) (string, error) {
 	args := []string{"checkin"}
 	args = append(args, files...)
-	args = append(args, "/comment:"+comment)
+	args = append(args, "/comment:"+comment, "/noprompt")
 	return c.execute(args...)
 }
 
