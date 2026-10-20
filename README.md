@@ -24,6 +24,15 @@ A terminal UI for Team Foundation Server (TFS) version control inspired by `lazy
 
 ## Installation
 
+**Scoop:**
+
+```powershell
+scoop bucket add dandygardad https://github.com/dandygardad/scoop-bucket
+scoop install lazytfs
+```
+
+**Go:**
+
 You can easily install `lazytfs` using `go install`. This requires you to have Go installed on your machine.
 
 ```bash
