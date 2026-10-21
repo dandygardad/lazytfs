@@ -99,6 +99,3 @@ Setting `EDITOR` (e.g. `setx EDITOR nvim`) puts that editor at the top of the `[
 ## License
 
 [MIT](LICENSE) © Dandy Garda
-
----
-*Built by [dg](https://dandygarda.com)*
